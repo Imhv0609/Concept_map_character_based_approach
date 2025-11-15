@@ -39,19 +39,20 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')
-import pygame
 
 # Initialize pygame for audio (with fallback for headless environments)
 AUDIO_AVAILABLE = False
 try:
+    import pygame
     # Try to initialize with dummy driver for headless environments
     os.environ['SDL_AUDIODRIVER'] = 'dummy'
     pygame.mixer.init()
     AUDIO_AVAILABLE = True
     logger.info("Audio system initialized successfully")
-except Exception as e:
+except (ImportError, Exception) as e:
     logger.warning(f"Audio system not available: {e}. Audio playback will be disabled.")
     AUDIO_AVAILABLE = False
+    pygame = None  # Set to None to avoid NameError later
 
 # Page config
 st.set_page_config(
