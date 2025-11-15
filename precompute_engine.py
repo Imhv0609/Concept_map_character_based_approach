@@ -8,6 +8,7 @@ This version uses ONLY gTTS and does NOT require MP3 duration reading.
 import os
 import tempfile
 import logging
+import time
 from typing import Dict, List, Tuple
 import networkx as nx
 from pathlib import Path
@@ -42,33 +43,53 @@ class PrecomputeEngine:
         logger.info(f"📐 Using layout: {layout_style}")
         logger.info(f"📁 Audio temp directory: {self.temp_dir}")
     
-    def generate_audio_file(self, text: str, index: int) -> str:
+    def generate_audio_file(self, text: str, index: int, max_retries: int = 5) -> str:
         """
-        Generate audio file using gTTS.
+        Generate audio file using gTTS with retry logic for rate limiting.
         
         Args:
             text: Text to synthesize
             index: Index for filename
+            max_retries: Maximum number of retry attempts (default: 5)
             
         Returns:
-            Path to generated audio file
+            Path to generated audio file, or None if all retries fail
         """
         output_file = os.path.join(self.temp_dir, f"audio_{index}.mp3")
         
-        try:
-            logger.info(f"🎤 Generating audio with gTTS: \"{text[:50]}...\"")
-            
-            # Generate with gTTS
-            tts = gTTS(text=text, lang='en', tld=self.voice, slow=False)
-            tts.save(output_file)
-            
-            self.audio_files.append(output_file)
-            logger.info(f"✅ Audio saved: {output_file}")
-            return output_file
-            
-        except Exception as e:
-            logger.error(f"❌ gTTS failed: {e}")
-            return None
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    # Exponential backoff with longer delays for rate limiting
+                    # Wait: 3s, 6s, 12s, 24s, 48s
+                    wait_time = 3 * (2 ** (attempt - 1))
+                    logger.info(f"⏳ Rate limit detected. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                    time.sleep(wait_time)
+                
+                logger.info(f"🎤 Generating audio with gTTS (attempt {attempt + 1}/{max_retries}): \"{text[:50]}...\"")
+                
+                # Generate with gTTS
+                tts = gTTS(text=text, lang='en', tld=self.voice, slow=False)
+                tts.save(output_file)
+                
+                self.audio_files.append(output_file)
+                logger.info(f"✅ Audio saved successfully: {output_file}")
+                return output_file
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg or "Too Many Requests" in error_msg:
+                    logger.warning(f"⚠️ Rate limited by gTTS (attempt {attempt + 1}/{max_retries}): {e}")
+                else:
+                    logger.warning(f"⚠️ gTTS attempt {attempt + 1}/{max_retries} failed: {e}")
+                
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ gTTS failed after {max_retries} attempts. Audio generation aborted.")
+                    logger.error(f"   This may be due to rate limiting from Google's TTS service.")
+                    logger.error(f"   Please try again in a few minutes.")
+                    return None
+        
+        return None
     
     def generate_all_audio(self, timeline: Dict) -> Dict:
         """

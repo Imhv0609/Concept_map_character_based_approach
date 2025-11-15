@@ -580,67 +580,75 @@ def run_dynamic_visualization(timeline, layout_style="hierarchical", show_edge_l
     total_duration = timeline.get("actual_audio_duration", 
                                   timeline["metadata"].get("total_duration", 0.0))
     
-    if audio_file and os.path.exists(audio_file):
-        # Initialize session state for visualization control
-        if 'viz_started' not in st.session_state:
-            st.session_state.viz_started = False
-        if 'viz_completed' not in st.session_state:
-            st.session_state.viz_completed = False
+    # Check if audio is available
+    audio_available = audio_file and os.path.exists(audio_file)
+    
+    if not audio_available:
+        st.error("❌ **Audio generation failed!**")
+        st.warning("This is likely due to rate limiting from Google's TTS service. Please wait a few minutes and try again.")
+        st.info("💡 **Tip**: If this keeps happening, try generating a shorter description or wait 5-10 minutes between attempts.")
+        logger.error(f"Audio file unavailable: {audio_file}")
+        st.stop()  # Stop the app here since audio is required
+    
+    # Continue with visualization only if audio is available
+    # Initialize session state for visualization control
+    if 'viz_started' not in st.session_state:
+        st.session_state.viz_started = False
+    if 'viz_completed' not in st.session_state:
+        st.session_state.viz_completed = False
+    
+    # DEBUG: Show current state
+    st.write(f"🔍 DEBUG: viz_started = {st.session_state.viz_started}, viz_completed = {st.session_state.viz_completed}")
+    
+    # Show instructions and button if not started
+    if not st.session_state.viz_started:
+        st.info("🎧 **Instructions:** Click the button below to start visualization with audio narration")
         
-        # DEBUG: Show current state
-        st.write(f"🔍 DEBUG: viz_started = {st.session_state.viz_started}, viz_completed = {st.session_state.viz_completed}")
+        # Show audio duration info
+        with audio_control_info:
+            st.info(f"📊 **Ready:** {total_duration:.1f}s duration | {len(concepts)} concepts")
         
-        # Show instructions and button if not started
-        if not st.session_state.viz_started:
-            st.info("🎧 **Instructions:** Click the button below to start visualization with audio narration")
-            
-            # Show audio duration info
-            with audio_control_info:
-                st.info(f"📊 **Ready:** {total_duration:.1f}s duration | {len(concepts)} concepts")
-            
-            start_button = st.button("🚀 Start Visualization with Audio", type="primary", use_container_width=True, key="start_viz_btn")
-            
-            if start_button:
-                logger.info("🔴 BUTTON CLICKED! Setting viz_started=True")
-                st.session_state.viz_started = True
-                st.write("✅ Button clicked! State updated. Script will continue...")
-                # No st.rerun() needed - button click automatically triggers rerun!
+        start_button = st.button("🚀 Start Visualization with Audio", type="primary", key="start_viz_btn")
         
-        # Run visualization if started but not completed
-        elif st.session_state.viz_started and not st.session_state.viz_completed:
-            logger.info("🟢 ENTERING VISUALIZATION BLOCK")
-            st.write("🟢 Visualization block entered!")
-            
-            # NOW show the audio player (won't be recreated on subsequent updates)
-            with audio_placeholder:
-                st.audio(audio_file, format='audio/mp3', autoplay=True)
-            
-            with audio_control_info:
-                st.success(f"🎧 **Playing:** {total_duration:.1f}s | {len(concepts)} concepts")
-            
-            st.info("⏳ **Playing...** Watch as concepts appear synchronized with the narration!")
-            
-            # Debug logging with timing information
-            logger.info(f"🚀 VISUALIZATION STARTED")
-            logger.info(f"   Total concepts: {len(concepts)}")
-            logger.info(f"   Total duration: {total_duration:.2f}s")
-            logger.info(f"   Graph has {len(G.nodes())} nodes, {len(pos)} positions")
-            
-            # Log concept timings for debugging
-            if timeline.get("metadata", {}).get("timing_scale_factor"):
-                scale_factor = timeline["metadata"]["timing_scale_factor"]
-                orig_duration = timeline["metadata"].get("original_estimated_duration", 0)
-                logger.info(f"   ⚖️ Timings rescaled: {orig_duration:.2f}s → {total_duration:.2f}s (factor: {scale_factor:.3f})")
-            
-            logger.info("   📍 Concept reveal schedule:")
-            for i, concept in enumerate(concepts[:10]):  # Show first 10
-                reveal_time = concept.get('reveal_time', 0.0)
-                name = concept.get('name', 'Unknown')
-                logger.info(f"      {i+1}. '{name}' at {reveal_time:.2f}s")
-            if len(concepts) > 10:
-                logger.info(f"      ... and {len(concepts) - 10} more concepts")
-            
-            # Progressive reveal over duration
+        if start_button:
+            logger.info("🔴 BUTTON CLICKED! Setting viz_started=True")
+            st.session_state.viz_started = True
+            st.write("✅ Button clicked! State updated. Script will continue...")
+            # No st.rerun() needed - button click automatically triggers rerun!
+    
+    # Run visualization if started but not completed
+    elif st.session_state.viz_started and not st.session_state.viz_completed:
+        logger.info("🟢 ENTERING VISUALIZATION BLOCK")
+        st.write("🟢 Visualization block entered!")
+        
+        # Show audio player
+        with audio_placeholder:
+            st.audio(audio_file, format='audio/mp3', autoplay=True)
+        with audio_control_info:
+            st.success(f"🎧 **Playing:** {total_duration:.1f}s | {len(concepts)} concepts")
+        st.info("⏳ **Playing...** Watch as concepts appear synchronized with the narration!")
+        
+        # Debug logging with timing information
+        logger.info(f"🚀 VISUALIZATION STARTED (with audio)")
+        logger.info(f"   Total concepts: {len(concepts)}")
+        logger.info(f"   Total duration: {total_duration:.2f}s")
+        logger.info(f"   Graph has {len(G.nodes())} nodes, {len(pos)} positions")
+        
+        # Log concept timings for debugging
+        if timeline.get("metadata", {}).get("timing_scale_factor"):
+            scale_factor = timeline["metadata"]["timing_scale_factor"]
+            orig_duration = timeline["metadata"].get("original_estimated_duration", 0)
+            logger.info(f"   ⚖️ Timings rescaled: {orig_duration:.2f}s → {total_duration:.2f}s (factor: {scale_factor:.3f})")
+        
+        logger.info("   📍 Concept reveal schedule:")
+        for i, concept in enumerate(concepts[:10]):  # Show first 10
+            reveal_time = concept.get('reveal_time', 0.0)
+            name = concept.get('name', 'Unknown')
+            logger.info(f"      {i+1}. '{name}' at {reveal_time:.2f}s")
+        if len(concepts) > 10:
+            logger.info(f"      ... and {len(concepts) - 10} more concepts")
+        
+        # Progressive reveal over duration
             visible_nodes = set()
             recently_revealed = {}  # Track when each node was revealed {node: reveal_time}
             highlight_duration = 1.5  # Keep nodes orange for 1.5 seconds after reveal
@@ -728,18 +736,14 @@ def run_dynamic_visualization(timeline, layout_style="hierarchical", show_edge_l
                 st.info(f"📊 **Concepts:** {', '.join(sorted(visible_nodes))}")
             
             logger.info(f"✅ VISUALIZATION COMPLETED")
-        
-        # Show completed state
-        else:
-            st.success("✅ **Visualization completed!** Generate a new concept map to see another animation.")
-            with progress_placeholder:
-                st.success("✅ Complete!")
-            with timer_placeholder:
-                st.success(f"🎉 **All concepts revealed!**")
-        
+    
+    # Show completed state
     else:
-        st.error("❌ Audio file not found. Cannot start visualization.")
-        logger.error(f"Audio file missing: {audio_file}")
+        st.success("✅ **Visualization completed!** Generate a new concept map to see another animation.")
+        with progress_placeholder:
+            st.success("✅ Complete!")
+        with timer_placeholder:
+            st.success(f"🎉 **All concepts revealed!**")
 
 
 def main():

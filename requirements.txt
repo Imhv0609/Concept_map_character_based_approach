@@ -13,5 +13,8 @@ plotly>=5.14.0
 # Audio Generation (gTTS only - character-based timing)
 gTTS>=2.3.0
 
+# Audio Playback
+pygame>=2.5.0
+
 # Utilities
 langsmith>=0.0.70
