@@ -11,6 +11,7 @@ import os
 import re
 import json
 import logging
+import time
 from typing import Dict, List, Tuple
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -18,8 +19,31 @@ from description_analyzer import (
     analyze_description_complexity,
     adjust_complexity_for_educational_level
 )
+from metrics_logger import log_metrics
+
 
 logger = logging.getLogger(__name__)
+
+# Configure LangSmith for tracing (optional - only if API key exists)
+langsmith_configured = False
+try:
+    from langsmith import Client
+    from langsmith.run_helpers import traceable
+    
+    # Check both variable names (LANGCHAIN_API_KEY is the standard one)
+    langsmith_api_key = os.getenv('LANGCHAIN_API_KEY') or os.getenv('LANGSMITH_API_KEY')
+    if langsmith_api_key:
+        # Set up LangSmith environment
+        os.environ['LANGCHAIN_TRACING_V2'] = 'true'
+        os.environ['LANGCHAIN_API_KEY'] = langsmith_api_key
+        os.environ['LANGCHAIN_PROJECT'] = 'concept-map-generator'
+        langsmith_client = Client()
+        langsmith_configured = True
+        logger.info("✅ LangSmith tracing enabled - View at: https://smith.langchain.com")
+    else:
+        logger.info("ℹ️  LangSmith tracing disabled (no LANGCHAIN_API_KEY)")
+except ImportError:
+    logger.info("ℹ️  LangSmith not installed (metrics will be logged locally)")
 
 # Configure Google Generative AI with API key from environment
 api_key = os.getenv('GOOGLE_API_KEY')
@@ -28,6 +52,19 @@ if api_key:
     logger.info("✅ Google Generative AI configured with API key")
 else:
     logger.warning("⚠️ GOOGLE_API_KEY not found in environment variables")
+
+
+# Create a decorator that works with or without LangSmith
+def optional_traceable(func):
+    """Decorator that uses LangSmith traceable if available, otherwise passes through"""
+    if langsmith_configured:
+        try:
+            return traceable(name=func.__name__, run_type="llm")(func)
+        except Exception as e:
+            logger.debug(f"LangSmith traceable decorator failed: {e}")
+            return func
+    return func
+
 
 
 def split_into_sentences(text: str) -> List[str]:
@@ -299,7 +336,24 @@ def extract_concepts_from_full_description(
     Returns:
         Tuple of (concepts_list, relationships_list)
     """
+    start_time = time.time()
     logger.info("🔥 Making SINGLE API call to extract all concepts from full description...")
+    
+    # Start LangSmith trace manually if configured
+    langsmith_run = None
+    if langsmith_configured:
+        try:
+            langsmith_run = langsmith_client.create_run(
+                name="extract_concepts_from_full_description",
+                run_type="llm",
+                inputs={
+                    "description": description[:500] + "..." if len(description) > 500 else description,
+                    "educational_level": educational_level
+                },
+                start_time=start_time
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create LangSmith run: {e}")
     
     # Analyze description complexity to determine target concept count
     description_analysis = analyze_description_complexity(description)
@@ -311,6 +365,15 @@ def extract_concepts_from_full_description(
     word_count = description_analysis['word_count']
     
     logger.info(f"📊 Description analysis: {word_count} words → {target_concepts} concepts ({detail_level} level)")
+    
+    # Track metrics
+    metrics = {
+        'word_count': word_count,
+        'target_concepts': target_concepts,
+        'detail_level': detail_level,
+        'educational_level': educational_level,
+        'api_call_start': start_time
+    }
     
     # Use the optimized gemini-2.5-flash-lite model with deterministic output
     generation_config = genai.GenerationConfig(
@@ -344,7 +407,7 @@ EXTRACTION PARAMETERS:
 Return ONLY valid JSON (no markdown, no explanation):
 {{
   "concepts": [
-    {{"name": "ConceptName", "type": "category", "importance": "high/medium/low", "definition": "brief definition"}}
+    {{"name": "ConceptName", "type": "category", "importance": "high/medium/low", "importance_rank": 1, "definition": "brief definition"}}
   ],
   "relationships": [
     {{"from": "Concept1", "to": "Concept2", "relationship": "verb phrase"}}
@@ -353,25 +416,96 @@ Return ONLY valid JSON (no markdown, no explanation):
 
 Rules:
 - Extract exactly {target_concepts} key concepts
+- Rank concepts by importance: importance_rank from 1 (most critical) to {target_concepts} (least critical)
+- Each rank number must be unique (1, 2, 3, etc.)
 - Create meaningful relationships between concepts
 - Use clear, concise names
-- Focus on core ideas only
 - Ensure all relationship concepts exist in concepts list"""
 
     try:
+        api_start = time.time()
         response = model.generate_content(prompt)
+        api_duration = time.time() - api_start
         response_text = response.text.strip()
+        
+        # Extract token usage from Google's response
+        token_usage = {}
+        if hasattr(response, 'usage_metadata'):
+            usage = response.usage_metadata
+            token_usage = {
+                'prompt_tokens': getattr(usage, 'prompt_token_count', 0),
+                'completion_tokens': getattr(usage, 'candidates_token_count', 0),
+                'total_tokens': getattr(usage, 'total_token_count', 0)
+            }
+        
+        # Update metrics
+        metrics['api_duration'] = api_duration
+        metrics['response_length'] = len(response_text)
+        metrics['token_usage'] = token_usage
+        
+        # Log token usage
+        if token_usage:
+            logger.info(f"🔢 Token Usage: Prompt={token_usage.get('prompt_tokens', 0)}, Completion={token_usage.get('completion_tokens', 0)}, Total={token_usage.get('total_tokens', 0)}")
         
         # Clean markdown code blocks if present
         if response_text.startswith('```'):
             response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
             response_text = re.sub(r'\s*```$', '', response_text)
         
+        parse_start = time.time()
         data = json.loads(response_text)
         concepts = data.get('concepts', [])
         relationships = data.get('relationships', [])
+        parse_duration = time.time() - parse_start
         
+        # Final metrics
+        total_duration = time.time() - start_time
+        metrics.update({
+            'parse_duration': parse_duration,
+            'total_duration': total_duration,
+            'concepts_extracted': len(concepts),
+            'relationships_extracted': len(relationships),
+            'success': True
+        })
+        
+        # Log metrics
         logger.info(f"✅ API call complete: Extracted {len(concepts)} concepts, {len(relationships)} relationships")
+        logger.info(f"⏱️  Metrics: API={api_duration:.2f}s | Parse={parse_duration:.2f}s | Total={total_duration:.2f}s")
+        
+        # Update LangSmith run with results and token usage
+        if langsmith_configured and langsmith_run:
+            try:
+                langsmith_client.update_run(
+                    run_id=langsmith_run.id,
+                    end_time=time.time(),
+                    outputs={
+                        "concepts": [{"name": c.get('name'), "type": c.get('type'), "importance": c.get('importance')} for c in concepts],
+                        "relationships": [{"from": r.get('from'), "to": r.get('to'), "relationship": r.get('relationship')} for r in relationships],
+                        "metrics": metrics
+                    },
+                    # THIS is the key - setting token counts directly
+                    prompt_tokens=token_usage.get('prompt_tokens', 0),
+                    completion_tokens=token_usage.get('completion_tokens', 0),
+                    total_tokens=token_usage.get('total_tokens', 0)
+                )
+                logger.debug(f"✅ Updated LangSmith run with tokens: {token_usage}")
+            except Exception as ls_error:
+                logger.warning(f"⚠️ Failed to update LangSmith run: {ls_error}")
+        
+        # Log metrics locally to JSON file
+        try:
+            log_metrics(
+                description=description,
+                educational_level=educational_level,
+                token_usage=token_usage,
+                timing_metrics=metrics,
+                concepts=concepts,
+                relationships=relationships,
+                success=True,
+                error=None
+            )
+        except Exception as log_error:
+            logger.warning(f"⚠️ Failed to log metrics locally: {log_error}")
         
         # Log detailed information
         if concepts:
@@ -387,11 +521,49 @@ Rules:
         return concepts, relationships
         
     except Exception as e:
+        error_duration = time.time() - start_time
+        metrics.update({
+            'total_duration': error_duration,
+            'success': False,
+            'error': str(e)
+        })
         logger.error(f"❌ Error extracting concepts: {e}")
+        logger.error(f"⏱️  Failed after {error_duration:.2f}s")
+        
+        # Update LangSmith run with error
+        if langsmith_configured and langsmith_run:
+            try:
+                langsmith_client.update_run(
+                    run_id=langsmith_run.id,
+                    end_time=time.time(),
+                    error=str(e),
+                    outputs={"error": str(e), "metrics": metrics}
+                )
+            except Exception as ls_error:
+                logger.debug(f"Failed to update LangSmith run with error: {ls_error}")
+        
+        # Log failed metrics locally
+        try:
+            log_metrics(
+                description=description,
+                educational_level=educational_level,
+                token_usage={},  # No tokens on error
+                timing_metrics=metrics,
+                concepts=[],
+                relationships=[],
+                success=False,
+                error=str(e)
+            )
+        except Exception as log_error:
+            logger.warning(f"⚠️ Failed to log error metrics: {log_error}")
+        
+        # Return minimal fallback data
+        return [], []
         # Return minimal fallback data
         return [], []
 
 
+@optional_traceable
 def create_timeline(
     description: str,
     educational_level: str,
@@ -419,7 +591,8 @@ def create_timeline(
                 "educational_level": str,
                 "total_duration": float,
                 "total_concepts": int,
-                "word_count": int
+                "word_count": int,
+                "processing_time": float
             },
             "full_text": str,
             "word_timings": List[Dict],
@@ -427,6 +600,7 @@ def create_timeline(
             "relationships": List[Dict]
         }
     """
+    pipeline_start = time.time()
     logger.info(f"🔄 Creating continuous timeline for topic: {topic_name}")
     
     # Step 1: Split into sentences (for grammatical correctness check)
@@ -439,15 +613,19 @@ def create_timeline(
     logger.info(f"📝 Merged into continuous text ({len(full_text)} chars)")
     
     # Step 3: Extract ALL concepts with SINGLE API call
+    extraction_start = time.time()
     concepts, relationships = extract_concepts_from_full_description(
         description, educational_level
     )
+    extraction_time = time.time() - extraction_start
     
     # Step 4: Calculate CHARACTER-BASED word-level timings
     # Formula: duration = char_count × 0.08s (min: 0.15s, max: 1.5s per word)
     # Examples: "I" (1 char) = 0.15s, "cat" (3 chars) = 0.24s, "photosynthesis" (14 chars) = 1.12s
+    timing_start = time.time()
     word_timings = calculate_word_timings(full_text)
     total_duration = word_timings[-1]['end_time'] if word_timings else 0.0
+    timing_calculation_time = time.time() - timing_start
     logger.info(f"⏱️ Calculated timings for {len(word_timings)} words (total: {total_duration:.1f}s)")
     
     # Step 5: Assign reveal_time to each concept
@@ -485,7 +663,17 @@ def create_timeline(
         }]
     }
     
+    # Calculate total processing time
+    total_processing_time = time.time() - pipeline_start
+    timeline["metadata"]["processing_time"] = total_processing_time
+    timeline["metadata"]["extraction_time"] = extraction_time
+    timeline["metadata"]["timing_calculation_time"] = timing_calculation_time
+    
     logger.info(f"✅ Continuous timeline created! {total_duration:.1f}s duration, {len(concepts)} concepts")
+    logger.info(f"⏱️  Pipeline Metrics:")
+    logger.info(f"    • Extraction: {extraction_time:.2f}s")
+    logger.info(f"    • Timing calc: {timing_calculation_time:.2f}s")
+    logger.info(f"    • Total: {total_processing_time:.2f}s")
     
     return timeline
 

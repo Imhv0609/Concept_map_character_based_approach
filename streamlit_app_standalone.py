@@ -588,9 +588,9 @@ def run_dynamic_visualization(timeline, layout_style="hierarchical", show_edge_l
         st.warning("This is likely due to rate limiting from Google's TTS service. Please wait a few minutes and try again.")
         st.info("💡 **Tip**: If this keeps happening, try generating a shorter description or wait 5-10 minutes between attempts.")
         logger.error(f"Audio file unavailable: {audio_file}")
-        st.stop()  # Stop the app here since audio is required
+        return  # Exit this function, don't show visualization without audio
     
-    # Continue with visualization only if audio is available
+    # Continue with visualization since audio is available
     # Initialize session state for visualization control
     if 'viz_started' not in st.session_state:
         st.session_state.viz_started = False
@@ -649,93 +649,93 @@ def run_dynamic_visualization(timeline, layout_style="hierarchical", show_edge_l
             logger.info(f"      ... and {len(concepts) - 10} more concepts")
         
         # Progressive reveal over duration
-            visible_nodes = set()
-            recently_revealed = {}  # Track when each node was revealed {node: reveal_time}
-            highlight_duration = 1.5  # Keep nodes orange for 1.5 seconds after reveal
+        visible_nodes = set()
+        recently_revealed = {}  # Track when each node was revealed {node: reveal_time}
+        highlight_duration = 1.5  # Keep nodes orange for 1.5 seconds after reveal
+        
+        # Calculate frames per second for smooth animation (targeting 10 FPS)
+        fps = 10  # frames per second
+        frame_duration = 1.0 / fps  # seconds per frame
+        total_frames = int(total_duration * fps)  # total number of frames
+        
+        logger.info(f"   Will reveal over {total_frames} frames at {fps} FPS ({frame_duration:.3f}s per frame)")
+        
+        # Start timing for real-time synchronization
+        start_time = time.time()
+        
+        for frame in range(total_frames + 1):
+            # Calculate elapsed time based on actual clock time (not frame count)
+            # This ensures we stay synchronized with audio even if rendering is slow
+            elapsed = time.time() - start_time
             
-            # Calculate frames per second for smooth animation (targeting 10 FPS)
-            fps = 10  # frames per second
-            frame_duration = 1.0 / fps  # seconds per frame
-            total_frames = int(total_duration * fps)  # total number of frames
+            # Safety check: don't exceed total duration
+            if elapsed > total_duration:
+                elapsed = total_duration
             
-            logger.info(f"   Will reveal over {total_frames} frames at {fps} FPS ({frame_duration:.3f}s per frame)")
-            
-            # Start timing for real-time synchronization
-            start_time = time.time()
-            
-            for frame in range(total_frames + 1):
-                # Calculate elapsed time based on actual clock time (not frame count)
-                # This ensures we stay synchronized with audio even if rendering is slow
-                elapsed = time.time() - start_time
-                
-                # Safety check: don't exceed total duration
-                if elapsed > total_duration:
-                    elapsed = total_duration
-                
-                # Update progress
-                with progress_placeholder:
-                    progress = elapsed / total_duration if total_duration > 0 else 1.0
-                    st.progress(progress, text=f"Progress: {int(progress * 100)}%")
-                
-                # Update timer
-                with timer_placeholder:
-                    st.metric("⏱️ Elapsed Time", f"{elapsed:.1f}s / {total_duration:.1f}s")
-                
-                # Reveal concepts that should be visible now
-                prev_count = len(visible_nodes)
-                for concept in concepts:
-                    concept_name = concept.get('name', '')
-                    reveal_time = concept.get('reveal_time', 0.0)
-                    if concept_name and reveal_time <= elapsed and concept_name not in visible_nodes:
-                        visible_nodes.add(concept_name)
-                        recently_revealed[concept_name] = elapsed  # Track when revealed
-                        logger.info(f"   ✨ Revealing '{concept_name}' at {elapsed:.2f}s")
-                
-                # Determine which nodes are still "new" (revealed within last 3 seconds)
-                new_nodes = {node for node, reveal_time in recently_revealed.items() 
-                            if elapsed - reveal_time < highlight_duration}
-                
-                # Render graph with currently visible nodes and highlight new ones
-                if len(visible_nodes) > 0:
-                    fig = render_graph(G, pos, visible_nodes, new_nodes, {}, {}, show_edge_labels)
-                    with graph_placeholder:
-                        st.pyplot(fig)
-                    plt.close(fig)
-                    logger.debug(f"   📊 Rendered graph with {len(visible_nodes)} nodes ({len(new_nodes)} highlighted)")
-                
-                # Update concepts counter
-                with concepts_placeholder:
-                    if len(visible_nodes) > 0:
-                        st.success(f"💡 **Revealed:** {len(visible_nodes)}/{len(concepts)} concepts")
-                    else:
-                        st.info(f"💡 **Waiting for first concept...**")
-                
-                # Sleep until next frame time (to maintain consistent FPS)
-                next_frame_time = start_time + (frame + 1) * frame_duration
-                sleep_time = next_frame_time - time.time()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                
-                # Stop if we've reached or exceeded the total duration
-                if elapsed >= total_duration:
-                    logger.info(f"   ⏹️ Reached total duration: {elapsed:.2f}s")
-                    break
-            
-            # Mark as completed
-            st.session_state.viz_completed = True
-            
-            # Final view
+            # Update progress
             with progress_placeholder:
-                st.success("✅ Complete!")
+                progress = elapsed / total_duration if total_duration > 0 else 1.0
+                st.progress(progress, text=f"Progress: {int(progress * 100)}%")
             
+            # Update timer
             with timer_placeholder:
-                st.balloons()
-                st.success(f"🎉 **All {len(visible_nodes)} concepts revealed!**")
+                st.metric("⏱️ Elapsed Time", f"{elapsed:.1f}s / {total_duration:.1f}s")
             
+            # Reveal concepts that should be visible now
+            prev_count = len(visible_nodes)
+            for concept in concepts:
+                concept_name = concept.get('name', '')
+                reveal_time = concept.get('reveal_time', 0.0)
+                if concept_name and reveal_time <= elapsed and concept_name not in visible_nodes:
+                    visible_nodes.add(concept_name)
+                    recently_revealed[concept_name] = elapsed  # Track when revealed
+                    logger.info(f"   ✨ Revealing '{concept_name}' at {elapsed:.2f}s")
+            
+            # Determine which nodes are still "new" (revealed within last 3 seconds)
+            new_nodes = {node for node, reveal_time in recently_revealed.items() 
+                        if elapsed - reveal_time < highlight_duration}
+            
+            # Render graph with currently visible nodes and highlight new ones
+            if len(visible_nodes) > 0:
+                fig = render_graph(G, pos, visible_nodes, new_nodes, {}, {}, show_edge_labels)
+                with graph_placeholder:
+                    st.pyplot(fig)
+                plt.close(fig)
+                logger.debug(f"   📊 Rendered graph with {len(visible_nodes)} nodes ({len(new_nodes)} highlighted)")
+            
+            # Update concepts counter
             with concepts_placeholder:
-                st.info(f"📊 **Concepts:** {', '.join(sorted(visible_nodes))}")
+                if len(visible_nodes) > 0:
+                    st.success(f"💡 **Revealed:** {len(visible_nodes)}/{len(concepts)} concepts")
+                else:
+                    st.info(f"💡 **Waiting for first concept...**")
             
-            logger.info(f"✅ VISUALIZATION COMPLETED")
+            # Sleep until next frame time (to maintain consistent FPS)
+            next_frame_time = start_time + (frame + 1) * frame_duration
+            sleep_time = next_frame_time - time.time()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            
+            # Stop if we've reached or exceeded the total duration
+            if elapsed >= total_duration:
+                logger.info(f"   ⏹️ Reached total duration: {elapsed:.2f}s")
+                break
+        
+        # Mark as completed
+        st.session_state.viz_completed = True
+        
+        # Final view
+        with progress_placeholder:
+            st.success("✅ Complete!")
+        
+        with timer_placeholder:
+            st.balloons()
+            st.success(f"🎉 **All {len(visible_nodes)} concepts revealed!**")
+        
+        with concepts_placeholder:
+            st.info(f"📊 **Concepts:** {', '.join(sorted(visible_nodes))}")
+        
+        logger.info(f"✅ VISUALIZATION COMPLETED")
     
     # Show completed state
     else:
