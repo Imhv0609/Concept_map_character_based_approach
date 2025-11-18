@@ -13,6 +13,8 @@ import os
 import tempfile
 import time
 import logging
+import json
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -21,7 +23,11 @@ load_dotenv()
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.abspath(__file__))
+PARENT_PATH = Path(parent_dir)
 sys.path.insert(0, parent_dir)
+
+TIMELINE_EXPORT_DIR = PARENT_PATH / "concept_json_timings"
+TIMELINE_EXPORT_DIR.mkdir(exist_ok=True)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -93,6 +99,24 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+def save_timeline_json_to_disk(timeline):
+    """Save the generated timeline JSON (with concept timings) to disk automatically."""
+    metadata = timeline.get("metadata", {})
+    topic = metadata.get("topic") or metadata.get("topic_name") or "concept_map"
+    sanitized_topic = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in topic).strip("_") or "concept_map"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{sanitized_topic}_{timestamp}.json"
+    filepath = TIMELINE_EXPORT_DIR / filename
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(timeline, f, indent=2, ensure_ascii=False)
+        logger.info(f"💾 Timeline JSON saved to {filepath}")
+        return filepath
+    except Exception as exc:
+        logger.error(f"Failed to save timeline JSON: {exc}")
+        return None
 
 
 def render_graph(G, pos, visible_nodes, new_nodes, alpha_map, scale_map, show_edge_labels=True):
@@ -873,6 +897,17 @@ def main():
                     st.write(f"✅ Generated {len(timeline['sentences'])} audio files")
                     st.write(f"✅ Calculated {layout_style} graph layout")
                     status.update(label="✅ Assets ready!", state="complete")
+
+                # Step 2.5: Auto-save complete timeline JSON with timings
+                saved_path = save_timeline_json_to_disk(timeline)
+                if saved_path:
+                    try:
+                        relative_path = saved_path.relative_to(PARENT_PATH)
+                    except ValueError:
+                        relative_path = saved_path
+                    st.success(f"💾 Timeline JSON auto-saved to `{relative_path}`")
+                else:
+                    st.warning("⚠️ Unable to auto-save timeline JSON. Please use the download button instead.")
                 
                 # Step 3: Store timeline in session state for persistence
                 st.session_state.timeline = timeline
